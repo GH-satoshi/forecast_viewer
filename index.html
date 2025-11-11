@@ -108,7 +108,8 @@
             else ovText += obj.text;
           }
         } else {
-          ovText = JSON.stringify(ovJson, null, 2);
+          // ovText = JSON.stringify(ovJson, null, 2);　制御文字を非表示にする
+          ovText = (ovJson.text || '').replace(/\{\}|\[\]/g,'');
         }
         overviewEl.textContent = ovText || '（概要データが見つかりません）';
 
