@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jma Forecast Viewer</title>
+  <style>
+    :root{--bg:#0f172a;--card:#0b1220;--muted:#94a3b8;--accent:#60a5fa}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,\"Hiragino Kaku Gothic ProN\",\"Noto Sans JP\",\"Segoe UI\",Roboto,Arial,sans-serif;margin:0;background:linear-gradient(180deg,var(--bg),#071024);color:#e6eef8;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .wrap{width:100%;max-width:980px}
+    header{display:flex;gap:12px;align-items:center;margin-bottom:16px}
+    h1{font-size:1.1rem;margin:0}
+    .controls{margin-left:auto;display:flex;gap:8px;align-items:center}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06);color:inherit;padding:8px 10px;border-radius:8px;cursor:pointer}
+    button:active{transform:translateY(1px)}
+    .grid{display:grid;grid-template-columns:1fr 320px;gap:16px}
+    @media(max-width:880px){.grid{grid-template-columns:1fr}}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,0.03),rgba(0,0,0,0.03));padding:14px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03)}
+    .overview{white-space:pre-wrap;font-size:0.95rem;color:#f1f5f9}
+    .meta{font-size:0.8rem;color:var(--muted);margin-bottom:8px}
+    .forecast-list{display:flex;flex-direction:column;gap:8px}
+    .day{display:flex;align-items:center;gap:12px;padding:10px;border-radius:10px;background:rgba(255,255,255,0.01)}
+    .date{min-width:92px;font-weight:600}
+    .weather{flex:1}
+    .small{font-size:0.85rem;color:var(--muted)}
+    .loading{display:flex;align-items:center;gap:8px}
+    .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);animation:blink 1.4s infinite}
+    @keyframes blink{0%{opacity:0.2}50%{opacity:1}100%{opacity:0.2}}
+    .error{color:#ffb4a2;background:rgba(255,180,162,0.06);padding:8px;border-radius:8px;color:#ffefe9}
+    footer{margin-top:12px;color:var(--muted);font-size:0.8rem}
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <header>
+      <h1>気象庁 天気予報ビューア（自動取得）</h1>
+      <div class="controls">
+        <button id="refreshBtn">更新</button>
+        <button id="copyBtn">JSON をコピー</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <div class="meta" id="meta">取得先: 気象庁（overview &amp; forecast）</div>
+        <div id="overview" class="overview">読み込み中...</div>
+      </section>
+
+      <aside class="card">
+        <div class="meta" id="areaName">地域: —</div>
+        <div id="forecastContainer" class="forecast-list">
+          <div class="loading"><div class="dot"></div><div>天気予報を取得中...</div></div>
+        </div>
+        <footer id="updated" class="small"></footer>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    // === 設定 ===
+    const OVERVIEW_URL = 'https://www.jma.go.jp/bosai/forecast/data/overview_forecast/130000.json';
+    const FORECAST_URL = 'https://www.jma.go.jp/bosai/forecast/data/forecast/130000.json';
+    const AUTO_REFRESH_MIN = 10; // 自動更新間隔（分）
+
+    // 内部状態
+    let lastJson = null;
+
+    // ヘルパー: 日付フォーマット
+    function fmtDateTime(dtStr){
+      try{
+        const d = new Date(dtStr);
+        return d.toLocaleString('ja-JP', {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+      }catch(e){return dtStr}
+    }
+
+    // メイン取得処理
+    async function fetchAndRender(){
+      const overviewEl = document.getElementById('overview');
+      const container = document.getElementById('forecastContainer');
+      const areaNameEl = document.getElementById('areaName');
+      const updatedEl = document.getElementById('updated');
+
+      overviewEl.textContent = '';
+      container.innerHTML = '<div class="loading"><div class="dot"></div><div>天気予報を取得中...</div></div>';
+
+      try{
+        const [ovRes, fcRes] = await Promise.all([
+          fetch(OVERVIEW_URL, {mode:'cors'}),
+          fetch(FORECAST_URL, {mode:'cors'})
+        ]);
+        if(!ovRes.ok || !fcRes.ok) throw new Error('HTTP エラー: ' + ovRes.status + '/' + fcRes.status);
+
+        const ovJson = await ovRes.json();
+        const fcJson = await fcRes.json();
+        lastJson = {overview: ovJson, forecast: fcJson};
+
+        // 概要表示 (overview_forecast の構造に合わせて)
+        let ovText = '';
+        if(Array.isArray(ovJson)){
+          const obj = ovJson[0] || ovJson;
+          if(obj.publishingOffice) ovText += obj.publishingOffice + ' — ' + fmtDateTime(obj.reportDatetime) + '\n\n';
+          if(obj.title) ovText += obj.title + '\n\n';
+          // text は配列のことがある
+          if(obj.text){
+            if(Array.isArray(obj.text)) ovText += obj.text.join('\n\n');
+            else ovText += obj.text;
+          }
+        } else {
+          ovText = JSON.stringify(ovJson, null, 2);
+        }
+        overviewEl.textContent = ovText || '（概要データが見つかりません）';
+
+        // 予報表示 (forecast の構造に合わせて柔軟に処理)
+        // forecast JSON は配列（都道府県毎）なので最初の要素を使う
+        const place = Array.isArray(fcJson) ? (fcJson[0] || {}) : fcJson;
+        const timeSeries = place.timeSeries || [];
+        const area = (timeSeries[0] && timeSeries[0].areas && timeSeries[0].areas[0]) ? timeSeries[0].areas[0] : null;
+        const areaName = area ? area.area.name || area.area0 || area.name || '—' : (place.name || '—');
+        areaNameEl.textContent = '地域: ' + areaName;
+
+        // まず、時刻配列（date list）を取る
+        // timeSeries の各要素には timeDefines と areas[].weathers / pops / temps などが含まれる
+        let dates = [];
+        if(timeSeries.length>0 && timeSeries[0].timeDefines) dates = timeSeries[0].timeDefines.slice();
+
+        // weathers(天気) を探す
+        let weathers = null;
+        for(const ts of timeSeries){
+          const a = ts.areas && ts.areas[0];
+          if(a && a.weathers){ weathers = a.weathers.slice(); break; }
+          // 場合によっては 'weatherCodes' といった別名もある
+          if(a && a.weatherCodes){
+            // translate codes -> leave as-is for now
+            weathers = a.weatherCodes.slice(); break;
+          }
+        }
+
+        // 降水確率 (pops)
+        let pops = null;
+        for(const ts of timeSeries){
+          const a = ts.areas && ts.areas[0];
+          if(a && a.pops){ pops = a.pops.slice(); break; }
+        }
+
+        // 最高/最低気温 (temps or tempsMin/tempsMax)
+        let temps = null;
+        for(const ts of timeSeries){
+          const a = ts.areas && ts.areas[0];
+          if(a && a.temps){ temps = a.temps.slice(); break; }
+          if(a && (a.tempsMin || a.tempsMax)){
+            temps = [];
+            // combine into single string per day
+            const min = a.tempsMin || []; const max = a.tempsMax || [];
+            const n = Math.max(min.length, max.length);
+            for(let i=0;i<n;i++){
+              const mi = (typeof min[i] !== 'undefined') ? min[i] + '℃' : '';
+              const ma = (typeof max[i] !== 'undefined') ? max[i] + '℃' : '';
+              temps.push([ma,mi].filter(Boolean).join(' / '));
+            }
+            break;
+          }
+        }
+
+        // 表示: 今日・明日・明後日（timeDefines の最初の3要素）
+        container.innerHTML = '';
+        const n = Math.min(3, dates.length || 3);
+        if(n===0){
+          container.innerHTML = '<div class="error">予報データの構造が想定と異なります。コンソールを確認してください。</div>';
+          console.log('forecast JSON', fcJson);
+        } else {
+          for(let i=0;i<n;i++){
+            const dt = dates[i] || '';
+            const dayLabel = (() => {
+              if(i===0) return '今日';
+              if(i===1) return '明日';
+              if(i===2) return '明後日';
+              return dt;
+            })();
+            const w = weathers && weathers[i] ? weathers[i] : '—';
+            const p = pops && pops[i] ? pops[i] + '%' : (pops ? pops[i] : '—');
+            const t = temps && temps[i] ? temps[i] : '—';
+
+            const div = document.createElement('div');
+            div.className = 'day';
+            div.innerHTML = `
+              <div class="date">${dayLabel}<div class="small">${dt? new Date(dt).toLocaleDateString('ja-JP'):''}</div></div>
+              <div class="weather"> <strong>${w}</strong> <div class="small">降水確率: ${p} / 気温: ${t}</div></div>
+            `;
+            container.appendChild(div);
+          }
+        }
+
+        updatedEl.textContent = '最終取得: ' + new Date().toLocaleString();
+
+      }catch(err){
+        console.error(err);
+        const overviewEl = document.getElementById('overview');
+        const container = document.getElementById('forecastContainer');
+        overviewEl.textContent = '';
+        container.innerHTML = `<div class="error">データ取得エラー: ${err.message}</div>`;
+        document.getElementById('areaName').textContent = '地域: —';
+        document.getElementById('updated').textContent = '';
+      }
+    }
+
+    // 操作ボタン
+    document.getElementById('refreshBtn').addEventListener('click', ()=>{ fetchAndRender(); });
+    document.getElementById('copyBtn').addEventListener('click', ()=>{
+      if(!lastJson){ alert('まだデータがありません'); return; }
+      const txt = JSON.stringify(lastJson, null, 2);
+      navigator.clipboard.writeText(txt).then(()=>alert('JSON をコピーしました（クリップボード）'), e=>alert('コピーに失敗しました'));
+    });
+
+    // 初回取得 & 自動更新
+    fetchAndRender();
+    setInterval(fetchAndRender, AUTO_REFRESH_MIN * 60 * 1000);
+
+    // 注意: ブラウザの CORS 制約により直接取得できない場合があります。
+    // その場合はローカルで簡易サーバーを立てるか（python -m http.server 等）、
+    // 開発用のプロキシを使ってください。
+  </script>
+</body>
+</html>
